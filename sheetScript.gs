@@ -61,6 +61,7 @@ function updatePlaylists(sheet) {
   if (!debugSheet) debugSheet = spreadsheet.insertSheet("Debug")
   debugSheet.clear();
   var nextDebugRow = 1; // First empty row to add logs to
+  var startTimestamp = new Date().toIsoString();
 
   /// For each playlist...
   for (var iRow = reservedTableRows; iRow < sheet.getLastRow(); iRow++) {
@@ -101,10 +102,10 @@ function updatePlaylists(sheet) {
         {
           try {
             var user = YouTube.Channels.list('id', {forUsername: channel, maxResults: 1});
-            if (!user || !user.items) addError("Cannot query for user " + channel)
-            else if (user.items.length === 0) addError("No user with name " + channel)
-            else if (user.items.length !== 1) addError("Multiple users with name " + channel)
-            else if (!user.items[0].id) addError("Cannot get id from user " + channel)
+            if (!user || !user.items) Logger.log("Cannot query for user " + channel) // dont throw error
+            else if (user.items.length === 0) Logger.log("No user with name " + channel) // dont throw error
+            else if (user.items.length !== 1) Logger.log("Multiple users with name " + channel) // dont throw error
+            else if (!user.items[0].id) Logger.log("Cannot get id from user " + channel) // dont throw error
             else channelIds.push(user.items[0].id);
           } catch (e) {
             addError("Cannot search for channel with name "+channel+", ERROR: " + "Message: [" + e.message + "] Details: " + JSON.stringify(e.details));
@@ -118,6 +119,7 @@ function updatePlaylists(sheet) {
       /// ...get videos from the channels...
       var newVideoIds = [];
       for (var i = 0; i < channelIds.length; i++) {
+        Logger.log("Getting Videos from "+channelIds[i])
         var videoIds = getVideoIdsWithLessQueries(channelIds[i], lastTimestamp)
         if (!videoIds || typeof(videoIds) !== "object") addError("Failed to get videos with channel id "+channelIds[i])
         else if (debugFlag_logWhenNoNewVideosFound && videoIds.length === 0) {
@@ -137,8 +139,9 @@ function updatePlaylists(sheet) {
       }
         
       Logger.log("Acquired "+newVideoIds.length+" videos")
+      Logger.log(newVideoIds)
       
-      if (!errorflag) {
+      if (!errorflag || errorflag) { // circumvent error check for robustness
         // ...add videos to playlist...
         if (!debugFlag_dontUpdatePlaylists) {
           addVideosToPlaylist(playlistId, newVideoIds);
@@ -155,12 +158,16 @@ function updatePlaylists(sheet) {
         }
       }
     // Update timestamp
-    if (!errorflag && !debugFlag_dontUpdateTimestamp) sheet.getRange(iRow + 1, reservedColumnTimestamp + 1).setValue(new Date().toIsoString()); 
+    if (!errorflag && !debugFlag_dontUpdateTimestamp) sheet.getRange(iRow + 1, reservedColumnTimestamp + 1).setValue(startTimestamp); 
     }
     // Prints logs to Debug sheet
     var newLogs = Logger.getLog().split("\n").slice(0, -1).map(function(log) {if(log.search("limit") != -1 && log.search("quota") != -1)errorflag=true;return log.split(" INFO: ")})
-    if (newLogs.length > 0) debugSheet.getRange(nextDebugRow, 1, newLogs.length, 2).setValues(newLogs)
-    nextDebugRow = debugSheet.getLastRow() + 1;
+    try{
+      if (newLogs.length > 0) debugSheet.getRange(nextDebugRow, 1, newLogs.length, 2).setValues(newLogs)
+      nextDebugRow = debugSheet.getLastRow() + 1;
+    } catch(e){
+      
+    }
     errorflag = false;
     totalErrorCount += plErrorCount;
     plErrorCount = 0;
@@ -349,7 +356,7 @@ function getPlaylistVideoIds(playlistId, lastTimestamp) {
 
     for (var j = 0; j < results.items.length; j++) {
       var item = results.items[j];
-      if (item.snippet.publishedAt > lastTimestamp)
+      if (new Date(item.snippet.publishedAt) > lastTimestamp)
         videoIds.push(item.snippet.resourceId.videoId);
     }
 
@@ -384,19 +391,34 @@ function getPlaylistVideoIds(playlistId, lastTimestamp) {
 
 // Add Videos to Playlist using Video IDs obtained before
 function addVideosToPlaylist(playlistId, videoIds, idx = 0, successCount = 0, errorCount = 0) {
+
+  var beginTimestamp = new Date('1990-01-01T00:00:00+00:00');
+  var existingVideoIds = getPlaylistVideoIds(playlistId, beginTimestamp);
+
   var totalVids = videoIds.length;
   if (0 < totalVids && totalVids < maxVideos) {
+
+    
     try {
-      YouTube.PlaylistItems.insert({
-        snippet: {
-          playlistId: playlistId,
-          resourceId: {
-            videoId: videoIds[idx],
-            kind: 'youtube#video'
+      if (existingVideoIds.includes(videoIds[idx])){
+        throw {
+          details:{
+            code: 409,
           }
+        };
       }
-      }, 'snippet');
-      var success = 1;
+      else {
+        YouTube.PlaylistItems.insert({
+          snippet: {
+            playlistId: playlistId,
+            resourceId: {
+              videoId: videoIds[idx],
+              kind: 'youtube#video'
+            }
+        }
+        }, 'snippet');
+        var success = 1;
+      }
     } catch (e) {
       if (e.details.code !== 409) { // Skip error count if Video exists in playlist already
         addError("Couldn't update playlist with video ("+videoIds[idx]+"), ERROR: " + "Message: [" + e.message + "] Details: " + JSON.stringify(e.details));
